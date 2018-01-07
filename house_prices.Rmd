@@ -1,0 +1,275 @@
+In this kernel, I explore the house prices training dataset and then perform Bayesian model averaging (BMA) using the BAS package to make predictions on the test set.
+
+```{r, message=FALSE}
+# Load packages
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(GGally) # pairplots
+library(corrplot) # correlation heatmap
+library(e1071) # measure skewness
+library(caret) # split data into training and validation sets
+library(BAS) # BMA using bas.lm
+theme_set(theme_classic())
+
+# Read data
+train <- read_csv('train.csv')
+test <- read_csv('test.csv')
+combined_noNA <- rbind(train[-81], test)
+```
+
+The first step is to check the dataset for missing values. Both train and test sets will be combined for this step to minimise the amount of work that needs to be repeated. As shown below, there are 19 columns with at least one missing value. Out of these 34 columns, 3 of them have missing values in more than 90% of observations. These variables should not have any significant effect on the prediction model if they are removed at this stage. Therefore, PoolQC, MiscFeature, and Alley, along with the associated variables PoolArea and MiscVal, were removed from both the training and the testing set.
+
+```{r}
+print(paste("There are", sum(colSums(is.na(combined_noNA)) != 0), 
+            "variables with at least 1 missing value."))
+cbind('Missing' = sort(colSums(is.na(combined_noNA)), decreasing = TRUE)[1:34],
+      'Proportion' = round(sort(colSums(is.na(combined_noNA)), 
+                                decreasing = TRUE)[1:34]/nrow(combined_noNA), 3))
+combined_noNA <- combined_noNA %>% select(-PoolQC, -PoolArea, -MiscFeature, -MiscVal, -Alley)
+```
+
+The next variable, Fence, has missing values in about 80% of the observations. According to the data description, a missing value in this column indicates that the house does not have a fence. Therefore, the missing values were replaced with a string, None, to indicate this.
+
+```{r}
+combined_noNA[which(is.na(combined_noNA$Fence)),'Fence'] <- 'None'
+table(combined_noNA$Fence)
+```
+
+The variable FireplaceQu has 1420 missing values. This corresponds to the number of houses without a fireplace. Therefore, the missing values in FireplaceQu were replaced with None. The next variable, LotFrontage, is a numeric variable, so zeros were inserted in place of the missing values. The addition of zeros into this column does affect the skewness of the distribution, which will be addressed later on.
+
+```{r}
+table('Fireplaces' = combined_noNA$Fireplaces)
+combined_noNA[which(is.na(combined_noNA$FireplaceQu)), 'FireplaceQu'] <- 'None'
+table('FireplaceQu' = combined_noNA$FireplaceQu)
+combined_noNA[which(is.na(combined_noNA$LotFrontage)), 'LotFrontage'] <- 0
+```
+
+The next few variables relate to the garage and will be considered together. Overall, 159 houses lack garages in this dataset. Among the garage variables, only GarageArea and GarageCars have no missing values. GarageType, GarageFinish, GarageQual and GarageCond are all categorical variables, the missing values were replaced with None to represent an additional level in the category. The GarageYrBlt variable contains the year in which the garage was built. I have omitted this variable because I concluded that setting it to zero or the most frequent value in the dataset would not be an accurate representation of the data.
+
+```{r}
+combined_noNA %>% select(starts_with("Garage")) %>% head()
+combined_noNA[which(is.na(combined_noNA$GarageType)), "GarageType"] <- "None"
+combined_noNA[which(is.na(combined_noNA$GarageFinish)), "GarageFinish"] <- "None"
+combined_noNA[which(is.na(combined_noNA$GarageQual)), "GarageQual"] <- "None"
+combined_noNA[which(is.na(combined_noNA$GarageCond)), "GarageCond"] <- "None"
+combined_noNA$GarageYrBlt <- NULL
+```
+
+The next 5 variables relate to the basement. Since they are all categorical variables, the missing values were replaced with None, similar to the other categorical variables above. Missing values in MasVnrType were replaced with None and those in MasVnrAreaby by zero. In categorical variables with a small number of missing values, they would be replaced with the most frequently occurring value. For instance, there is only 1 missing value in Electrical, so it was replaced with SBrkr, the most frequent value in this category. The variable Utilities was dropped from the dataset since only 1 observation has a different level from the rest. Since Exterior1st and Exterior2nd have multiple levels, some of which have only a few observations, those with less than 30 were combined to Other.
+
+```{r}
+combined_noNA[which(is.na(combined_noNA$BsmtQual)), "BsmtQual"] <- "None"
+combined_noNA[which(is.na(combined_noNA$BsmtCond)), "BsmtCond"] <- "None"
+combined_noNA[which(is.na(combined_noNA$BsmtExposure)), "BsmtExposure"] <- "None"
+combined_noNA[which(is.na(combined_noNA$BsmtFinType1)), "BsmtFinType1"] <- "None"
+combined_noNA[which(is.na(combined_noNA$BsmtFinType2)), "BsmtFinType2"] <- "None"
+combined_noNA[which(is.na(combined_noNA$MasVnrType)), "MasVnrType"] <- "None"
+combined_noNA[which(is.na(combined_noNA$MasVnrArea)), "MasVnrArea"] <- 0
+table("MSZoning" = combined_noNA$MSZoning)
+combined_noNA[which(is.na(combined_noNA$MSZoning)), "MSZoning"] <- "RL"
+table("Utilities" = combined_noNA$Utilities)
+combined_noNA$Utilities <- NULL
+combined_noNA[which(is.na(combined_noNA$BsmtFullBath)), "BsmtFullBath"] <- 0
+combined_noNA[which(is.na(combined_noNA$BsmtHalfBath)), "BsmtHalfBath"] <- 0
+combined_noNA[which(is.na(combined_noNA$BsmtFinSF1)), "BsmtFinSF1"] <- 0
+combined_noNA[which(is.na(combined_noNA$BsmtFinSF2)), "BsmtFinSF2"] <- 0
+combined_noNA[which(is.na(combined_noNA$BsmtUnfSF)), "BsmtUnfSF"] <- 0
+combined_noNA[which(is.na(combined_noNA$TotalBsmtSF)), "TotalBsmtSF"] <- 0
+table("Functional" = combined_noNA$Functional)
+combined_noNA[which(is.na(combined_noNA$Functional)), "Functional"] <- "Typ"
+table("Exterior1st" = combined_noNA$Exterior1st)
+combined_noNA[which(is.na(combined_noNA$Exterior1st)), "Exterior1st"] <- "Other"
+combined_noNA[combined_noNA$Exterior1st %in% c("AsphShn", "BrkComm", "CBlock", "ImStucc", "Stone"), "Exterior1st"] <- "Other"
+table("Exterior1st" = combined_noNA$Exterior2nd)
+combined_noNA[which(is.na(combined_noNA$Exterior2nd)), "Exterior2nd"] <- "Other"
+combined_noNA[combined_noNA$Exterior2nd %in% c("AsphShn", "BrkComm", "CBlock", "ImStucc", "Stone"), "Exterior2nd"] <- "Other"
+table("KitchenQual" = combined_noNA$KitchenQual)
+combined_noNA[which(is.na(combined_noNA$KitchenQual)), "KitchenQual"] <- "TA"
+table("Electrical" = combined_noNA$Electrical)
+combined_noNA[which(is.na(combined_noNA$Electrical)), "Electrical"] <- "SBrkr"
+table("SaleType" = combined_noNA$SaleType)
+combined_noNA[which(is.na(combined_noNA$SaleType)), "SaleType"] <- "WD"
+combined_noNA[which(is.na(combined_noNA$GarageCars)), "GarageCars"] <- 0
+combined_noNA[which(is.na(combined_noNA$GarageArea)), "GarageArea"] <- 0
+print(paste("There are", sum(colSums(is.na(combined_noNA)) != 0), "variables with missing values."))
+```
+
+Now that the missing values have been addressed, the categorical variables will be investigated to ensure consistency between train and test sets, as well as to remove sparsely populated levels. The code segment below will only go through the categories that were changed or removed. 
+
+```{r}
+combined_noNA$MSSubClass <- NULL # removed due to differences between train and test sets
+combined_noNA$Street <- NULL # removed because only 12 houses have gravel
+combined_noNA$Heating <- NULL # remove Heating since a large majority of houses have gas heating
+combined_noNA[combined_noNA$LotShape %in% c("IR1", "IR2", "IR3"), "LotShape"] <- "Irr" # combined all irregular levels into one
+combined_noNA[combined_noNA$LotConfig %in% c("FR2", "FR3"), "LotConfig"] <- "Other" # combined FR2 and FR3 into one level
+combined_noNA$Condition2 <- NULL # remove Condition2 since a large majority of houses are normal
+combined_noNA[combined_noNA$Condition1 %in% c("PosA", "PosN"), "Condition1"] <- "Pos"
+combined_noNA[combined_noNA$Condition1 %in% c("RRAe", "RRAn", "RRNe", "RRNn"), "Condition1"] <- "RR"
+combined_noNA[combined_noNA$HouseStyle %in% c("1.5Fin", "1.5Unf"), "HouseStyle"] <- "1.5Story"
+combined_noNA[combined_noNA$HouseStyle %in% c("2.5Fin", "2.5Unf"), "HouseStyle"] <- "2.5Story"
+combined_noNA[combined_noNA$MasVnrType %in% c("BrkCmn", "BrkFace"), "MasVnrType"] <- "Brick"
+
+# combining slab, stone and wood as other
+combined_noNA[combined_noNA$Foundation %in% c("Slab", "Stone", "Wood"), "Foundation"] <- "Other"
+
+# combining all levels besides gable and hip as other
+combined_noNA[!combined_noNA$RoofStyle %in% c("Gable", "Hip"), "RoofStyle"] <- "Other"
+
+# combining all levels beside CompShg and Tar&Grv
+combined_noNA[combined_noNA$RoofMatl %in% c("WdShake", "Wdshngl"), "RoofMatl"] <- "Wood"
+combined_noNA[!combined_noNA$RoofMatl %in% c("Wood", "CompShg", "Tar&Grv"), "RoofMatl"] <- "Other"
+
+# combining all non SBrkr levels as FBox for fuse box
+combined_noNA[combined_noNA$Electrical != "SBrkr", "Electrical"] <- "FBox"
+
+# change functional to a yes or no variable (yes for typical, no for others)
+combined_noNA[combined_noNA$Functional != "Typ", "Functional"] <- "No"
+combined_noNA[combined_noNA$Functional == "Typ", "Functional"] <- "Yes"
+
+# combining Ex and Gd into Good, and Fa and Po into bad
+combined_noNA[combined_noNA$ExterQual %in% c("Ex", "Gd"), "ExterQual"] <- "Good"
+combined_noNA[combined_noNA$ExterQual %in% c("Fa", "Po"), "ExterQual"] <- "Bad"
+combined_noNA[combined_noNA$ExterCond %in% c("Ex", "Gd"), "ExterCond"] <- "Good"
+combined_noNA[combined_noNA$ExterCond %in% c("Fa", "Po"), "ExterCond"] <- "Bad"
+combined_noNA[combined_noNA$HeatingQC %in% c("Ex", "Gd"), "HeatingQC"] <- "Good"
+combined_noNA[combined_noNA$HeatingQC %in% c("Fa", "Po"), "HeatingQC"] <- "Bad"
+combined_noNA[combined_noNA$FireplaceQu %in% c("Ex", "Gd"), "FireplaceQu"] <- "Good"
+combined_noNA[combined_noNA$FireplaceQu %in% c("Fa", "Po"), "FireplaceQu"] <- "Bad"
+combined_noNA[combined_noNA$BsmtQual %in% c("Ex", "Gd"), "BsmtQual"] <- "Good"
+combined_noNA[combined_noNA$BsmtQual %in% c("Fa", "Po"), "BsmtQual"] <- "Bad"
+combined_noNA[combined_noNA$BsmtCond %in% c("Ex", "Gd"), "BsmtCond"] <- "Good"
+combined_noNA[combined_noNA$BsmtCond %in% c("Fa", "Po"), "BsmtCond"] <- "Bad"
+combined_noNA[combined_noNA$GarageQual %in% c("Ex", "Gd"), "GarageQual"] <- "Good"
+combined_noNA[combined_noNA$GarageQual %in% c("Fa", "Po"), "GarageQual"] <- "Bad"
+combined_noNA[combined_noNA$GarageCond %in% c("Ex", "Gd"), "GarageCond"] <- "Good"
+combined_noNA[combined_noNA$GarageCond %in% c("Fa", "Po"), "GarageCond"] <- "Bad"
+
+# combine AdjLand and Alloca to Other
+combined_noNA[combined_noNA$SaleCondition %in% c("AdjLand", "Alloca"), "SaleCondition"] <- "Other"
+
+# combine the different warranty deeds and contracts as WD and Con respectively
+combined_noNA[combined_noNA$SaleType %in% c("WD", "CWD"), "SaleType"] <- "WD"
+combined_noNA[combined_noNA$SaleType %in% c("Con", "ConLD", "ConLI", "ConLw"), "SaleType"] <- "Con"
+
+# split into train and test sets
+train <- as_data_frame(cbind(combined_noNA[1:1460,], "SalePrice" = train$SalePrice))
+test <- as_data_frame(combined_noNA[1461:2919,])
+```
+
+Now I will begin exploring the training dataset. The first variable of interest is SalePrice. The histogram below shows that the distribution is right-skewed. To avoid the drawbacks of skewness on the model, log(SalePrice) will be used instead. Log-transforming the SalePrice variable reduces the skewness close to zero. This is a similar case for all continuous numeric variables in the dataset, such as those referring to area. Discrete numeric variables would not be transformed.
+
+```{r}
+ggplot(train, aes(x = SalePrice)) + 
+  geom_histogram(fill = "blue", col = "black", alpha = 0.7, binwidth = 10000) + 
+  annotate(geom="text", x=500000, y=100, 
+           label=paste("Skewness:", round(skewness(train$SalePrice), 4)))
+ggplot(train, aes(x = log(SalePrice))) + 
+  geom_histogram(fill = "blue", col = "black", alpha = 0.7, binwidth = 0.1) + 
+  annotate(geom="text", x=13, y=150, 
+           label=paste("Skewness:", round(skewness(log(train$SalePrice)), 4)))
+```
+
+Two additional variables, HouseAge and Remodeled, were created. HouseAge is the difference between YearBuilt and YrSold. This show how old or new the house was at the time of sale. The distribution of this variable is shown in the histogram below. It is somewhat right-skewed and looks bimodal. Remodeled is a binary variable to show if the house has been remodeled since it was built. 
+
+```{r}
+train <- train %>% mutate(HouseAge = YrSold - YearBuilt, 
+                        Remodeled = ifelse(YearRemodAdd == YearBuilt, "Yes", "No")) %>%
+  select(-YrSold, -YearBuilt, -YearRemodAdd)
+ggplot(train, aes(x = HouseAge)) + 
+  geom_histogram(fill = "blue", col = "black", alpha = 0.7, binwidth = 5) + 
+  annotate(geom="text", x=100, y=100, 
+           label=paste("Skewness:", round(skewness(train$HouseAge), 4)))
+```
+
+Next, the relationship between SalePrice and selected numeric variables was investigated. A correlation heatmap is plotted below using the corrplot package. It does highlight some relationships between numeric variables, particularly those that are positively correlated with SalePrice. Among these include OverallQual, TotalBsmtSF, GrLivArea, GarageArea, and GarageCars. GArageArea and GarageCars are highly correlated with one another, which makes sense because the larger the area, the more cars can fit in the garage. The new variable HouseAge is actually negatively correlated with SalePrice, suggesting that older houses tend to have lower sale price. These variables were then investigated in more detail using the pairplots. The plots do hightlight that there are potential outliers in the data, particularly in the GrLivArea plots. This will be addressed later on using residuals from the model predictions.
+
+```{r}
+train %>% select_if(is.numeric) %>% select(-Id) %>% cor() %>% corrplot(tl.col = "black")
+train %>% select(SalePrice, OverallQual, TotalBsmtSF, GrLivArea, GarageArea, HouseAge) %>%
+  ggpairs()
+```
+
+Taking a closer look at OverallQual using boxplots, it also highlights some potential outliers in sale price based on the the overall quality of the house, including 2 houses valued at over $600000. These two observations also happen to have a large area according to the pairplots above. The sale price of a house tends to increase as the overall quality increases. The relationship does not appear to be linear based on how the median sale price increases as the overall quality increases. 
+
+```{r}
+ggplot(train, aes(x = factor(OverallQual), y = SalePrice)) + 
+  geom_boxplot(fill = "skyblue") + labs(x = "OverallQual") + theme(legend.position = "none")
+```
+
+Now, selected the categorical variables and their relationship with sale price will be explored. First, the sale price for houses in different neighborhoods is compared. The most expensive neighborhood by median house price is Northridge Heights, followed by Northridge and Stone Brook, while the cheapest neighborhood is Meadow Village.
+
+```{r}
+ggplot(train, aes(x = reorder(Neighborhood, SalePrice, median, order = TRUE), y = SalePrice)) + 
+  geom_boxplot(fill = "skyblue") + xlab("Neighborhood") + coord_flip()
+```
+
+The new variable, Remodeled, showed that around 52% of houses in the training set have been remodeled. A boxplot of the sale price is shown below. there is only a slight difference in the median sale price between houses that have been remodeled and houses that have not. There are a large number of possible outliers here, although they are quite evenly spread between the categories.
+
+```{r}
+ggplot(train, aes(x = Remodeled, y = SalePrice)) + geom_boxplot(fill = "skyblue") + coord_flip()
+```
+
+Next, looking at the zoning classification of the houses, the boxplot shows that a large number of observations are in low density residential zones. Floating village residential zones have the highest median sale price. There are also a large number of expensive houses in the low density residential zone, some of them may be outliers that could affect the model. This will be identified using residual plots later on.
+
+```{r}
+ggplot(train, aes(x = reorder(MSZoning, SalePrice, median, order = TRUE), y = SalePrice)) +
+  geom_boxplot(fill = "skyblue") + xlab("MSZoning") + coord_flip()
+```
+
+Another interesting boxplot is that of sale price for different types of house foundation. As shown by the boxplot, houses with poured concrete foundation tend to be more expensive compared to houses with other types of foundation.
+
+```{r}
+ggplot(train, aes(x = reorder(Foundation, SalePrice, median, order = TRUE), y = SalePrice)) +
+  geom_boxplot(fill = "skyblue") + xlab("Foundation") + coord_flip()
+```
+
+Other categorical variables can be explored in a similar way. I will not go through all of them in this kernel as it would take quite a bit of time and space. Other categorical variables of interest include those that measure quality and condition of various aspects of the house, LotConfig, LandContour, HouseStyle, Electrical, Functional, and Condition1.
+
+Before building the BMA model, the training set was split into two sets of equal size, one to train the model and the other for validation. This can help improve the model without relying on the test set and the public leaderboard scores on Kaggle. The continuous numeric variables were transformed to reduce skewness before splitting the dataset. Discrete numeric variables were left as is.
+
+```{r}
+takeLog <- c("SalePrice", "LotArea", "1stFlrSF", "GrLivArea")
+takeLog1p <- c("2ndFlrSF", "LowQualFinSF", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", 
+               "3SsnPorch", "ScreenPorch")
+takeSqrt <- c("LotFrontage", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "HouseAge")
+train[takeLog] <- log(train[takeLog])
+train[takeLog1p] <- log1p(train[takeLog1p])
+train[takeSqrt] <- sqrt(train[takeSqrt])
+factorVar <- train %>% select_if(is.character) %>% colnames()
+train[factorVar] <- lapply(train[factorVar], factor)
+set.seed(42)
+spl <- createDataPartition(train$Neighborhood)
+training_set <- train[spl$Resample1,]
+validation_set <- train[-spl$Resample1,]
+```
+
+Now, the bas.lm function will be used to perform BMA with Jeffreys-Zellner-Siow prior. With default parameters, the bas.lm function sampled 524288 models to produce the BMA model using Bayesian Adaptive Sampling (BAS).
+
+```{r}
+bma_model <- bas.lm(SalePrice ~ . - Id, data = training_set, prior = "BIC",
+                    modelprior = uniform(), initprobs = "uniform", method = "BAS")
+```
+
+
+
+```{r}
+bma_predict <- predict(bma_model, validation_set)
+```
+
+
+
+```{r}
+test <- test %>% mutate(HouseAge = YrSold - YearBuilt, 
+                        Remodeled = ifelse(YearRemodAdd == YearBuilt, "Yes", "No")) %>%
+  select(-YrSold, -YearBuilt, -YearRemodAdd)
+test$HouseAge[which(test$HouseAge < 0)] <- 0 # one house hasd an age of -1, replace with 0
+takeLog <- c("LotArea", "1stFlrSF", "GrLivArea")
+takeLog1p <- c("2ndFlrSF", "LowQualFinSF", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", 
+               "3SsnPorch", "ScreenPorch")
+takeSqrt <- c("LotFrontage", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "HouseAge")
+test[takeLog] <- log(test[takeLog])
+test[takeLog1p] <- log1p(test[takeLog1p])
+test[takeSqrt] <- sqrt(test[takeSqrt])
+```
+
