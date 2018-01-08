@@ -1,14 +1,16 @@
-In this kernel, I explore the house prices training dataset and then perform Bayesian model averaging (BMA) using the BAS package to make predictions on the test set.
+In this kernel, I explore the house prices training dataset and use random forest regression to predict the sale price for houses in the testing set.
 
 ```{r, message=FALSE}
 # Load packages
 library(dplyr)
 library(ggplot2)
 library(GGally) # pairplots
+library(ggpubr)
 library(corrplot) # correlation heatmap
 library(e1071) # measure skewness
 library(caTools) # split data into training and validation sets
-library(BAS) # BMA using bas.lm
+library(randomForest) # random forest model
+library(gbm)
 theme_set(theme_classic())
 
 # Read data
@@ -229,7 +231,7 @@ ggplot(train, aes(x = reorder(Foundation, SalePrice, median, order = TRUE), y = 
 
 Other categorical variables can be explored in a similar way. I will not go through all of them in this kernel as it would take quite a bit of time and space. Other categorical variables of interest include those that measure quality and condition of various aspects of the house, LotConfig, LandContour, HouseStyle, Electrical, Functional, and Condition1.
 
-Before building the BMA model, the training set was split into two sets of equal size, one to train the model and the other for validation. This can help improve the model without relying on the test set and the public leaderboard scores on Kaggle. The continuous numeric variables were transformed to reduce skewness before splitting the dataset. Discrete numeric variables were left as is.
+Before building the model, the training set was split into two sets of equal size, one to train the model and the other for validation. This can help improve the model without relying on the test set and the public leaderboard scores on Kaggle. The continuous numeric variables were transformed to reduce skewness before splitting the dataset. Discrete numeric variables were left as is.
 
 ```{r}
 takeLog <- c("SalePrice", "LotArea", "X1stFlrSF", "GrLivArea")
@@ -244,48 +246,46 @@ train[factorVar] <- lapply(train[factorVar], factor)
 set.seed(42)
 # split by neighborhood to ensure consistency between sets
 spl <- sample.split(train$Neighborhood, SplitRatio = 0.5)
-training_set <- train[spl,]
-validation_set <- train[!spl,]
+X_train <- train[spl,] %>% select(-Id, -SalePrice)
+y_train <- train[spl,which(colnames(train) == "SalePrice")]
+X_val <- train[!spl,] %>% select(-Id, -SalePrice)
+y_val <- train[!spl,which(colnames(train) == "SalePrice")]
 ```
 
-Now, the bas.lm function will be used to perform BMA with Jeffreys-Zellner-Siow prior. With default parameters, the bas.lm function sampled 524288 models to produce the BMA model using Bayesian Adaptive Sampling (BAS). To reduce computation time, the MCMC method was used, with the maximum number of iterations set to 2 million. The number of models sampled is now 6456. The resulting residual plot is shown below.
+Now, the random forest model will be trained. The default parameters will be used at first to obtain a model to use as a baseline. The model will then be tuned later on.
 
 ```{r}
 set.seed(42)
-bma_model <- bas.lm(SalePrice ~ . - Id, data = training_set, prior = "JZS",
-                    modelprior = uniform(), initprobs = "uniform", method = "MCMC", 
-                    MCMC.iterations = 10^6)
-plot(bma_model, which = 1)
-ggplot(training_set, aes(x = exp(GrLivArea), y = exp(SalePrice))) + geom_point() +
-  annotate(x = exp(training_set$GrLivArea[653]), y = exp(training_set$SalePrice[653]) + 20000,
-           geom = "text", label = "Outlier", col = "red") +
-  labs(x = "GrLivArea", y = "SalePrice")
+rf_model <- randomForest(X_train, y_train, importance = TRUE)
 ```
 
-There is 1 obvious outlier whose residual is much further from zero compared to the other observations. This is observation number 653, which the model overestimates. As shown in the scatterplot of SalePrice against GrLivArea, this observation corresponds to the house with the largest GrLivArea, but has a sale price of less than $200000. Removing this observation might give better prediction accuracy, however, that was not explored in this kernel. Before predicting on the test data, predictions were made on the validation set to be used as a basis for comparison. There are several options for the estimators to be used to make predictions. These are the BMA estimator, which averages predictions from all the models sampled, the best predictive model (BPM), the highest probability model (HPM) and the median probability model (MPM). Predictions from each of these estimators will be compared using the root-mean-squared error (RMSE). The estimator which gives the lowest RMSE on the validation set will be used to make predictions on the test set.
+The fitted values for the training set can be obtained from the random forest object. The residuals plot is shown below. A histogram for the residuals is also shown below. The plots show that the variability of the residuals is not constant and that the residuals are not normally distributed.
 
 ```{r}
-estimator <- c("BMA", "BPM", "HPM", "MPM")
-training_set_rmse <- validation_set_rmse <- rep(0, length(estimator))
-for (i in 1:length(estimator)) {
-  # training set fitted values
-  bma_fitted <- predict(bma_model, estimator = estimator[i])
-  training_set_rmse[i] <- 
-    sqrt(sum((training_set$SalePrice - bma_fitted$fit)^2)/nrow(training_set))
-  
-  # validation set predictions
-  bma_predict <- predict(bma_model, validation_set, estimator = estimator[i], prediction = TRUE)
-  validation_set_rmse[i] <- 
-    sqrt(sum((validation_set$SalePrice - bma_predict$fit)^2)/nrow(validation_set))
-}
-
-rmse_df <- as_data_frame(cbind("Estimator" = estimator, 
-                               "Train_RMSE" = round(training_set_rmse, 5), 
-                               "Validation_RMSE" = round(validation_set_rmse, 5)))
-rmse_df
+train_predictions <- as_data_frame(cbind("Actual" = y_train,"Fitted" = rf_model$predicted))
+train_predictions <- train_predictions %>% mutate(Residuals = Actual - Fitted)
+train_resid_plot <- ggplot(train_predictions, aes(x = Fitted, y = Residuals)) + 
+  geom_point(alpha = 0.7) + geom_hline(aes(yintercept = 0), size = 0.5, linetype = "dashed") +
+  annotate(x = train_predictions$Fitted[653] + 0.03, y = train_predictions$Residuals[653], 
+           geom = "text", label = "653", color = "red", size = 3) +
+  annotate(x = train_predictions$Fitted[19] + 0.02, y = train_predictions$Residuals[19], 
+           geom = "text", label = "19", color = "red", size = 3) + 
+  annotate(x = train_predictions$Fitted[466] + 0.03, y = train_predictions$Residuals[466], 
+           geom = "text", label = "466", color = "red", size = 3)
+train_resid_hist <- ggplot(train_predictions, aes(x = Residuals)) + 
+  geom_histogram(color= "black", fill = "blue", alpha = 0.7, breaks = seq(-1.1,1.1,0.05))
+ggarrange(train_resid_plot, train_resid_hist, ncol = 1, nrow = 2)
 ```
 
-The MPM estimator gives the lowest RMSE on both the training and the validation sets, whereas the BMA estimator had the smallest amnount of difference between the two RMSE values. Predictions from both these estimators will be used for submission.
+```{r}
+val_prediction <- predict(rf_model, newdata = X_val)
+print(paste("Training set RMSE:", 
+            round(sqrt(sum(train_predictions$Residuals^2)/nrow(train_predictions)), 5)))
+print(paste("Validation set RMSE:", 
+            round(sqrt(sum((y_val - val_prediction)^2)/length(y_val)), 5)))
+```
+
+Using the random forest model above, predictions were made on the test set observations.
 
 ```{r}
 test$HouseAge = test$YrSold - test$YearBuilt
@@ -299,17 +299,12 @@ takeSqrt <- c("LotFrontage", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmt
 test[takeLog] <- log(test[takeLog])
 test[takeLog1p] <- log1p(test[takeLog1p])
 test[takeSqrt] <- sqrt(test[takeSqrt])
+test[factorVar] <- lapply(test[factorVar], factor)
 ```
 
 ```{r}
-test_prediction <- predict(bma_model, test, estimator = "BMA", prediction = TRUE)
-submission <- cbind(test$Id, exp(test_prediction$fit))
-colnames(submission) <- c("Id", "SalePrice")
-write.csv(submission, "BMA_submission.csv", row.names = FALSE)
-
-test_prediction <- predict(bma_model, test, estimator = "MPM", prediction = TRUE)
-submission <- cbind(test$Id, exp(test_prediction$fit))
-colnames(submission) <- c("Id", "SalePrice")
-write.csv(submission, "MPM_submission.csv", row.names = FALSE)
+test_prediction <- predict(rf_model, test[,-1])
+submission <- cbind("Id" = test$Id, "SalePrice" = exp(test_prediction))
+write.csv(submission, "RF_submission.csv", row.names = FALSE)
 ```
 
