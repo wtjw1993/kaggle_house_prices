@@ -2,19 +2,18 @@ In this kernel, I explore the house prices training dataset and then perform Bay
 
 ```{r, message=FALSE}
 # Load packages
-library(readr)
 library(dplyr)
 library(ggplot2)
 library(GGally) # pairplots
 library(corrplot) # correlation heatmap
 library(e1071) # measure skewness
-library(caret) # split data into training and validation sets
+library(caTools) # split data into training and validation sets
 library(BAS) # BMA using bas.lm
 theme_set(theme_classic())
 
 # Read data
-train <- read_csv('train.csv')
-test <- read_csv('test.csv')
+train <- read.csv('train.csv', stringsAsFactors = FALSE)
+test <- read.csv('test.csv', stringsAsFactors = FALSE)
 combined_noNA <- rbind(train[-81], test)
 ```
 
@@ -98,12 +97,16 @@ print(paste("There are", sum(colSums(is.na(combined_noNA)) != 0), "variables wit
 Now that the missing values have been addressed, the categorical variables will be investigated to ensure consistency between train and test sets, as well as to remove sparsely populated levels. The code segment below will only go through the categories that were changed or removed. 
 
 ```{r}
-combined_noNA$MSSubClass <- NULL # removed due to differences between train and test sets
-combined_noNA$Street <- NULL # removed because only 12 houses have gravel
-combined_noNA$Heating <- NULL # remove Heating since a large majority of houses have gas heating
 combined_noNA[combined_noNA$LotShape %in% c("IR1", "IR2", "IR3"), "LotShape"] <- "Irr" # combined all irregular levels into one
 combined_noNA[combined_noNA$LotConfig %in% c("FR2", "FR3"), "LotConfig"] <- "Other" # combined FR2 and FR3 into one level
-combined_noNA$Condition2 <- NULL # remove Condition2 since a large majority of houses are normal
+
+# removed MSSubCLass due to differences between train and test sets
+# removed Street because only 12 houses have gravel
+# remove Heating since a large majority of houses have gas heating
+# remove Condition2 since a large majority of houses are normal
+combined_noNA <- combined_noNA %>% select(-MSSubClass, -Street, -Heating, -Condition2)
+
+# combining different levels in Condition1 ahd HouseStyle
 combined_noNA[combined_noNA$Condition1 %in% c("PosA", "PosN"), "Condition1"] <- "Pos"
 combined_noNA[combined_noNA$Condition1 %in% c("RRAe", "RRAn", "RRNe", "RRNn"), "Condition1"] <- "RR"
 combined_noNA[combined_noNA$HouseStyle %in% c("1.5Fin", "1.5Unf"), "HouseStyle"] <- "1.5Story"
@@ -153,8 +156,8 @@ combined_noNA[combined_noNA$SaleType %in% c("WD", "CWD"), "SaleType"] <- "WD"
 combined_noNA[combined_noNA$SaleType %in% c("Con", "ConLD", "ConLI", "ConLw"), "SaleType"] <- "Con"
 
 # split into train and test sets
-train <- as_data_frame(cbind(combined_noNA[1:1460,], "SalePrice" = train$SalePrice))
-test <- as_data_frame(combined_noNA[1461:2919,])
+train <- cbind(combined_noNA[1:1460,], "SalePrice" = train$SalePrice)
+test <- combined_noNA[1461:2919,]
 ```
 
 Now I will begin exploring the training dataset. The first variable of interest is SalePrice. The histogram below shows that the distribution is right-skewed. To avoid the drawbacks of skewness on the model, log(SalePrice) will be used instead. Log-transforming the SalePrice variable reduces the skewness close to zero. This is a similar case for all continuous numeric variables in the dataset, such as those referring to area. Discrete numeric variables would not be transformed.
@@ -173,9 +176,9 @@ ggplot(train, aes(x = log(SalePrice))) +
 Two additional variables, HouseAge and Remodeled, were created. HouseAge is the difference between YearBuilt and YrSold. This show how old or new the house was at the time of sale. The distribution of this variable is shown in the histogram below. It is somewhat right-skewed and looks bimodal. Remodeled is a binary variable to show if the house has been remodeled since it was built. 
 
 ```{r}
-train <- train %>% mutate(HouseAge = YrSold - YearBuilt, 
-                        Remodeled = ifelse(YearRemodAdd == YearBuilt, "Yes", "No")) %>%
-  select(-YrSold, -YearBuilt, -YearRemodAdd)
+train$HouseAge = train$YrSold - train$YearBuilt
+train$Remodeled = ifelse(train$YearRemodAdd == train$YearBuilt, "Yes", "No")
+train <- train %>% select(-YrSold, -YearBuilt, -YearRemodAdd)
 ggplot(train, aes(x = HouseAge)) + 
   geom_histogram(fill = "blue", col = "black", alpha = 0.7, binwidth = 5) + 
   annotate(geom="text", x=100, y=100, 
@@ -229,9 +232,9 @@ Other categorical variables can be explored in a similar way. I will not go thro
 Before building the BMA model, the training set was split into two sets of equal size, one to train the model and the other for validation. This can help improve the model without relying on the test set and the public leaderboard scores on Kaggle. The continuous numeric variables were transformed to reduce skewness before splitting the dataset. Discrete numeric variables were left as is.
 
 ```{r}
-takeLog <- c("SalePrice", "LotArea", "1stFlrSF", "GrLivArea")
-takeLog1p <- c("2ndFlrSF", "LowQualFinSF", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", 
-               "3SsnPorch", "ScreenPorch")
+takeLog <- c("SalePrice", "LotArea", "X1stFlrSF", "GrLivArea")
+takeLog1p <- c("X2ndFlrSF", "LowQualFinSF", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", 
+               "X3SsnPorch", "ScreenPorch")
 takeSqrt <- c("LotFrontage", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "HouseAge")
 train[takeLog] <- log(train[takeLog])
 train[takeLog1p] <- log1p(train[takeLog1p])
@@ -239,37 +242,74 @@ train[takeSqrt] <- sqrt(train[takeSqrt])
 factorVar <- train %>% select_if(is.character) %>% colnames()
 train[factorVar] <- lapply(train[factorVar], factor)
 set.seed(42)
-spl <- createDataPartition(train$Neighborhood)
-training_set <- train[spl$Resample1,]
-validation_set <- train[-spl$Resample1,]
+# split by neighborhood to ensure consistency between sets
+spl <- sample.split(train$Neighborhood, SplitRatio = 0.5)
+training_set <- train[spl,]
+validation_set <- train[!spl,]
 ```
 
-Now, the bas.lm function will be used to perform BMA with Jeffreys-Zellner-Siow prior. With default parameters, the bas.lm function sampled 524288 models to produce the BMA model using Bayesian Adaptive Sampling (BAS).
+Now, the bas.lm function will be used to perform BMA with Jeffreys-Zellner-Siow prior. With default parameters, the bas.lm function sampled 524288 models to produce the BMA model using Bayesian Adaptive Sampling (BAS). To reduce computation time, the MCMC method was used, with the maximum number of iterations set to 2 million. The number of models sampled is now 6456. The resulting residual plot is shown below.
 
 ```{r}
-bma_model <- bas.lm(SalePrice ~ . - Id, data = training_set, prior = "BIC",
-                    modelprior = uniform(), initprobs = "uniform", method = "BAS")
+set.seed(42)
+bma_model <- bas.lm(SalePrice ~ . - Id, data = training_set, prior = "JZS",
+                    modelprior = uniform(), initprobs = "uniform", method = "MCMC", 
+                    MCMC.iterations = 10^6)
+plot(bma_model, which = 1)
+ggplot(training_set, aes(x = exp(GrLivArea), y = exp(SalePrice))) + geom_point() +
+  annotate(x = exp(training_set$GrLivArea[653]), y = exp(training_set$SalePrice[653]) + 20000,
+           geom = "text", label = "Outlier", col = "red") +
+  labs(x = "GrLivArea", y = "SalePrice")
 ```
 
-
+There is 1 obvious outlier whose residual is much further from zero compared to the other observations. This is observation number 653, which the model overestimates. As shown in the scatterplot of SalePrice against GrLivArea, this observation corresponds to the house with the largest GrLivArea, but has a sale price of less than $200000. Removing this observation might give better prediction accuracy, however, that was not explored in this kernel. Before predicting on the test data, predictions were made on the validation set to be used as a basis for comparison. There are several options for the estimators to be used to make predictions. These are the BMA estimator, which averages predictions from all the models sampled, the best predictive model (BPM), the highest probability model (HPM) and the median probability model (MPM). Predictions from each of these estimators will be compared using the root-mean-squared error (RMSE). The estimator which gives the lowest RMSE on the validation set will be used to make predictions on the test set.
 
 ```{r}
-bma_predict <- predict(bma_model, validation_set)
+estimator <- c("BMA", "BPM", "HPM", "MPM")
+training_set_rmse <- validation_set_rmse <- rep(0, length(estimator))
+for (i in 1:length(estimator)) {
+  # training set fitted values
+  bma_fitted <- predict(bma_model, estimator = estimator[i])
+  training_set_rmse[i] <- 
+    sqrt(sum((training_set$SalePrice - bma_fitted$fit)^2)/nrow(training_set))
+  
+  # validation set predictions
+  bma_predict <- predict(bma_model, validation_set, estimator = estimator[i], prediction = TRUE)
+  validation_set_rmse[i] <- 
+    sqrt(sum((validation_set$SalePrice - bma_predict$fit)^2)/nrow(validation_set))
+}
+
+rmse_df <- as_data_frame(cbind("Estimator" = estimator, 
+                               "Train_RMSE" = round(training_set_rmse, 5), 
+                               "Validation_RMSE" = round(validation_set_rmse, 5)))
+rmse_df
 ```
 
-
+The MPM estimator gives the lowest RMSE on both the training and the validation sets, whereas the BMA estimator had the smallest amnount of difference between the two RMSE values. Predictions from both these estimators will be used for submission.
 
 ```{r}
-test <- test %>% mutate(HouseAge = YrSold - YearBuilt, 
-                        Remodeled = ifelse(YearRemodAdd == YearBuilt, "Yes", "No")) %>%
-  select(-YrSold, -YearBuilt, -YearRemodAdd)
+test$HouseAge = test$YrSold - test$YearBuilt
+test$Remodeled = ifelse(test$YearRemodAdd == test$YearBuilt, "Yes", "No")
+test <- test %>% select(-YrSold, -YearBuilt, -YearRemodAdd)
 test$HouseAge[which(test$HouseAge < 0)] <- 0 # one house hasd an age of -1, replace with 0
-takeLog <- c("LotArea", "1stFlrSF", "GrLivArea")
-takeLog1p <- c("2ndFlrSF", "LowQualFinSF", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", 
-               "3SsnPorch", "ScreenPorch")
+takeLog <- c("LotArea", "X1stFlrSF", "GrLivArea")
+takeLog1p <- c("X2ndFlrSF", "LowQualFinSF", "WoodDeckSF", "OpenPorchSF", "EnclosedPorch", 
+               "X3SsnPorch", "ScreenPorch")
 takeSqrt <- c("LotFrontage", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "HouseAge")
 test[takeLog] <- log(test[takeLog])
 test[takeLog1p] <- log1p(test[takeLog1p])
 test[takeSqrt] <- sqrt(test[takeSqrt])
+```
+
+```{r}
+test_prediction <- predict(bma_model, test, estimator = "BMA", prediction = TRUE)
+submission <- cbind(test$Id, exp(test_prediction$fit))
+colnames(submission) <- c("Id", "SalePrice")
+write.csv(submission, "BMA_submission.csv", row.names = FALSE)
+
+test_prediction <- predict(bma_model, test, estimator = "MPM", prediction = TRUE)
+submission <- cbind(test$Id, exp(test_prediction$fit))
+colnames(submission) <- c("Id", "SalePrice")
+write.csv(submission, "MPM_submission.csv", row.names = FALSE)
 ```
 
