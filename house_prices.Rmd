@@ -9,6 +9,7 @@ library(ggpubr)
 library(corrplot) # correlation heatmap
 library(e1071) # measure skewness
 library(caTools) # split data into training and validation sets
+library(caret) # cross-validation and parameter tuning
 library(randomForest) # random forest model
 library(gbm)
 theme_set(theme_classic())
@@ -252,17 +253,17 @@ X_val <- train[!spl,] %>% select(-Id, -SalePrice)
 y_val <- train[!spl,which(colnames(train) == "SalePrice")]
 ```
 
-Now, the random forest model will be trained. The default parameters will be used at first to obtain a model to use as a baseline. The model will then be tuned later on.
+Now, the random forest model will be trained. The default parameters will be used at first to obtain a model to use as a baseline.
 
 ```{r}
 set.seed(42)
-rf_model <- randomForest(X_train, y_train, importance = TRUE)
+rf_model <- randomForest(X_train, y_train)
 ```
 
-The fitted values for the training set can be obtained from the random forest object. The residuals plot is shown below. A histogram for the residuals is also shown below. The plots show that the variability of the residuals is not constant and that the residuals are not normally distributed.
+The fitted values for the training set can be obtained from the random forest object. The residuals plot is shown below. A histogram for the residuals is also shown below. The plots show that the variability of the residuals is not constant and that there are outliers in the dataset. Removing these outliers might improve the model.
 
 ```{r}
-train_predictions <- as_data_frame(cbind("Actual" = y_train,"Fitted" = rf_model$predicted))
+train_predictions <- as_data_frame(cbind("Actual" = y_train, "Fitted" = rf_model$predicted))
 train_predictions <- train_predictions %>% mutate(Residuals = Actual - Fitted)
 train_resid_plot <- ggplot(train_predictions, aes(x = Fitted, y = Residuals)) + 
   geom_point(alpha = 0.7) + geom_hline(aes(yintercept = 0), size = 0.5, linetype = "dashed") +
@@ -285,7 +286,16 @@ print(paste("Validation set RMSE:",
             round(sqrt(sum((y_val - val_prediction)^2)/length(y_val)), 5)))
 ```
 
-Using the random forest model above, predictions were made on the test set observations.
+The three outliers identified previously were removed and the model retrained to investigate if they adversely affected the model. The validation set predictions will be used to compare the models.
+
+```{r}
+rf_model_2 <- randomForest(X_train[-c(19,466,653),], y_train[-c(19,466,653)])
+val_prediction <- predict(rf_model_2, newdata = X_val)
+print(paste("Validation set RMSE:", 
+            round(sqrt(sum((y_val - val_prediction)^2)/length(y_val)), 5)))
+```
+
+The validation set RMSE actually increased slightly after the outliers were removed. Therefore, using the first random forest model, predictions were made on the test set observations.
 
 ```{r}
 test$HouseAge = test$YrSold - test$YearBuilt
@@ -306,5 +316,31 @@ test[factorVar] <- lapply(test[factorVar], factor)
 test_prediction <- predict(rf_model, test[,-1])
 submission <- cbind("Id" = test$Id, "SalePrice" = exp(test_prediction))
 write.csv(submission, "RF_submission.csv", row.names = FALSE)
+```
+
+Having obtained the prediction using default parameters, the parameter `mtry`, the number of variables randomly sampled from at each split, was tuned to see if th performance could be improved. 5-fold cross-validation was done using the trainControl function in the caret package while using different values for mtry as specified using the expand.grid function.
+
+```{r}
+set.seed(42)
+tr_control <- trainControl(method = "cv", number = 5)
+mtry_grid <- expand.grid(.mtry = seq(5, ncol(X_train), 5))
+rf_grid <- train(x = X_train, y = y_train, method = "rf", metric = "RMSE",
+                 trControl = tr_control, tuneGrid = mtry_grid)
+rf_grid
+```
+
+From the grid search, the best RMSE score was obtained when mtry was equal to 30. Therefore, using this model to make predictions on the validation set and then on test set for submission. Comparing the validation set RMSEs, the tuned model achieved a marginal improvement over the model with default parameters.
+
+```{r}
+rf_tuned <- rf_grid$finalModel
+val_prediction <- predict(rf_tuned, newdata = X_val)
+print(paste("Validation set RMSE:", 
+            round(sqrt(sum((y_val - val_prediction)^2)/length(y_val)), 5)))
+```
+
+```{r}
+test_prediction <- predict(rf_tuned, newdata = test[,-1])
+submission <- cbind("Id" = test$Id, "SalePrice" = exp(test_prediction))
+write.csv(submission, "RF_tuned_submission.csv", row.names = FALSE)
 ```
 
